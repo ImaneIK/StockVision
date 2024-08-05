@@ -663,11 +663,11 @@ def black_scholes_merton(stock_price, strike_price, rate, time, volatility, dive
         return {'strike_price': 0, 'call': 0, 'put': 0, 'call_decision': 'Error', 'put_decision': 'Error'}
 
 
-if __name__ == '__main__':
-    try:
+#if __name__ == '__main__':
+#    try:
 
         # Start the Flask app
-        app.run(port=8000)
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        time.sleep(5)  # Wait for a while before restarting the app
+#        app.run(port=8000)
+#    except Exception as e:
+#        print(f"Error: {str(e)}")
+#        time.sleep(5)  # Wait for a while before restarting the app
