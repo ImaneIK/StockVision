@@ -286,7 +286,7 @@ def market_data_combination(prices2, mark_ticker=ticker.lower(), start='2010-1-1
 
 
 sp500 = yf.Ticker('^GSPC')
-sp500 = sp500.history(period="14y")
+sp500 = sp500.history(period="10y")
 market_prices = sp500['Close']
 
 # Check if prices2 is defined
@@ -298,8 +298,10 @@ else:
     # You can define prices2 or take any other necessary actions
     prices2 = pd.DataFrame()  # For example, create an empty DataFrame
 
+market_prices.index = pd.to_datetime(market_prices.index)
 market_prices.index = market_prices.index.tz_localize(None)
 
+print(type(market_prices.index))  # Should print: <class 'pandas.core.indexes.datetimes.DatetimeIndex'>
 
 def capm(prices2, market_prices, riskfree_rate=0.025):
     """
