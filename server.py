@@ -58,8 +58,8 @@ def process_data():
         print(f"Received model: {model}")
         ticker = data.get('ticker', '')
         print(f"Received ticker: {ticker}")
-        if ticker == "" or model == "":
-            print("ticker or model is empty")
+        if model == "":
+            print("model is empty")
             return jsonify({'error': 'Ticker or model is empty'}), 400
 
         elif ticker != "" and model == 'MonteCarlo':
@@ -81,7 +81,7 @@ def process_data():
 
         elif ticker != "" and model == 'BlackScholes':
             print("we are in BlackScholes")
-            # divedend_str = data.get('divedend')
+            divedend_str = data.get('divedend')
             volatility_str = data.get('volatility')
             strike_str = data.get('strike')
             period_str = data.get('period')
@@ -91,7 +91,7 @@ def process_data():
             stock_price = import_stock_data(ticker, start_date, end_date)
             price = stock_price.iloc[-1]
 
-            # divedend = float(divedend_str) if divedend_str is not None else None
+            divedend = float(divedend_str) if divedend_str is not None else None
             volatility = float(volatility_str) if volatility_str is not None else None
             strike = float(strike_str) if strike_str is not None else None
             period = float(period_str) if period_str is not None else None
@@ -100,18 +100,148 @@ def process_data():
             print(model, ticker, volatility, strike, period, interest_rate, start_date, end_date)
 
             try:
-                result = black_scholes_merton(price, strike, interest_rate, period, volatility)
+                result = black_scholes_merton(price, strike, interest_rate, period, volatility,divedend )
                 print(result)
                 return jsonify({'result': result})
             except Exception as ex:
                 print(f"Error in black_scholes_merton: {str(ex)}")
                 return jsonify({'error': 'An error occurred in black_scholes_merton'}), 500
 
+        elif model == 'vasicek':
+            # Handle Vasicek simulation
+            result, status_code = Vasicek_simulation(data)
+            return jsonify(result), status_code
+
         else:
             return jsonify({'error': 'Invalid model specified'}), 400
 
     except Exception as ex:
         return jsonify({'error': str(ex)}), 500
+
+
+# Define the Vasicek simulation function
+def Vasicek_simulation(data):
+    try:
+        r0 = float(data.get('initial_short_rate', 0.02))  # Default initial short rate
+        a = float(data.get('mean_reversion_speed', 0.5)  )    # Default mean reversion speed
+        b = float(data.get('long_term_mean', 0.03) )    # Default long-term mean
+        sigma = float(data.get('vasicek_volatility', 0.01) ) # Default volatility
+        T = int(data.get('time_horizon', 10) )      # Default time horizon
+        num_steps = int(data.get('number_of_steps', 1000))  # Default number of steps
+        num_paths = int(data.get('number_of_paths', 20))      # Default number of paths
+
+        # Perform Vasicek simulation
+        try:
+            simulated_rates = simulate_vasicek(r0, a, b, sigma, T, num_steps, num_paths)
+            MLE_Estimate = Vasicek_MLE(simulated_rates, T / num_steps, a, b)
+
+            # Generate a plot
+            fig, ax = plt.subplots()
+            ax.plot(simulated_rates)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('Interest Rate')
+            ax.set_title('Simulated Interest Rate Paths')
+
+            # Encode the plot as a base64 string
+            img_buffer = BytesIO()
+            plt.savefig(img_buffer, format='png')
+            img_buffer.seek(0)
+            plot_data = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
+
+            # Time axis
+            time_axis = np.linspace(0, T, num_steps + 1)
+
+            # Average value
+            average_rates = [r0 * np.exp(-a * t) + b * (1 - np.exp(-a * t)) for t in time_axis]
+
+            # Standard deviation
+            std_dev = [(sigma * 2 / (2 * a) * (1 - np.exp(-2 * a * t))) * .5 for t in time_axis]
+
+            # Calculate upper and lower bounds (±2 sigma)
+            upper_bound = [average_rates[i] + 2 * std_dev[i] for i in range(len(time_axis))]
+            lower_bound = [average_rates[i] - 2 * std_dev[i] for i in range(len(time_axis))]
+
+            # Simulate interest rate paths (num_paths x num_steps)
+            simulated_rates = simulate_vasicek(r0, a, b, sigma, T, num_steps, num_paths)
+
+            # Plotting multiple paths with time on x-axis
+            plt.figure(figsize=(10, 6))
+            plt.title('Vasicek Model - Simulated Interest Rate Paths')
+            plt.xlabel('Time (years)')
+            plt.ylabel('Interest Rate')
+            for i in range(num_paths):
+                plt.plot(time_axis, simulated_rates[:, i])
+
+            plt.plot(time_axis, average_rates, color='black', linestyle='--', label='Average', linewidth=3)
+            plt.plot(time_axis, upper_bound, color='grey', linestyle='--', label='Upper Bound (2Σ)', linewidth=3)
+            plt.plot(time_axis, lower_bound, color='grey', linestyle='--', label='Lower Bound (2Σ)', linewidth=3)
+            plt.legend()
+
+            # Encode the plot as a base64 string
+            img_buffer = BytesIO()
+            plt.savefig(img_buffer, format='png')
+            img_buffer.seek(0)
+            plot_data = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
+
+            result = {
+                'a_est': round(MLE_Estimate[0], 3),
+                'b_est': round(MLE_Estimate[1], 3),
+                'sigma_est': round(MLE_Estimate[2], 3),
+                'plot': plot_data
+            }
+            return {'result': result}, 200
+        except Exception as ex:
+            return {'error': str(ex)}, 500
+
+    except Exception as ex:
+        return {'error': str(ex)}, 500
+
+
+def simulate_vasicek(r0, a, b, sigma, T, num_steps, num_paths):
+    dt = T / num_steps
+    rates = np.zeros((num_steps + 1, num_paths))
+    rates[0] = r0
+
+    for t in range(1, num_steps + 1):
+        dW = np.random.normal(0, 1, num_paths)
+        rates[t] = rates[t - 1] + a * (b - rates[t - 1]) * dt + sigma * np.sqrt(dt) * dW
+
+    return rates
+
+
+def Vasicek_MLE(r, dt, a, b):
+    r = r[:, 0]
+    n = len(r)
+    # Estimation a and b
+    S0 = 0
+    S1 = 0
+    S00 = 0
+    S01 = 0
+    for i in range(n-1):
+        S0 = S0 + r[i]
+        S1 = S1 + r[i + 1]
+        S00 = S00 + r[i] * r[i]
+        S01 = S01 + r[i] * r[i + 1]
+    S0 = S0 / (n-1)
+    S1 = S1 / (n-1)
+    S00 = S00 / (n-1)
+    S01 = S01 / (n-1)
+    b_MLE = (S1 * S00 - S0 * S01) / (S0 * S1 - S0**2 - S01 + S00)
+    a_MLE = 1 / dt * np.log((S0 - b_MLE) / (S1 - b_MLE))
+
+    # Estimation sigma
+    beta = 1 / a * (1 - np.exp(-a * dt))
+    temp = 0
+    for i in range(n-1):
+        mi = b * a * beta + r[i] * (1 - a * beta)
+        temp = temp + (r[i+1] - mi)**2
+    sigma_MLE = (1 / ((n - 1) * beta * (1 - .5 * a * beta)) * temp)**0.5
+    return a_MLE, b_MLE, sigma_MLE
+
+#MLE_Estimate = Vasicek_MLE(simulated_rates, T / num_steps)
+#print("a_est: " + str(np.round(MLE_Estimate[0], 3)))
+#print("b_est: " + str(np.round(MLE_Estimate[1], 3)))
+#print("sigma_est: " + str(np.round(MLE_Estimate[2], 3)))
 
 
 def import_stock_data(ticker, start, end):
@@ -508,7 +638,7 @@ def execution_decision(strike_price, stock_price, option_type):
     return call_decision, put_decision
 
 
-def black_scholes_merton(stock_price, strike_price, rate, time, volatility, divedend=0.0):
+def black_scholes_merton(stock_price, strike_price, rate, time, volatility, divedend):
     try:
 
         d1 = (log(stock_price / strike_price) + (rate - divedend + volatility ** 2 / 2) * time) / (
