@@ -251,7 +251,7 @@ def import_stock_data(ticker, start, end):
 
     prices = df['Close']
 
-    last_price = prices[-1]
+    last_price = prices.iloc[-1]
 
     return prices
 
@@ -521,8 +521,8 @@ def simulate_MonteCarlo(prices, days, iterations, return_type='log', plot=True):
     if plot:
         x = pd.DataFrame(price_list).iloc[-1]
         fig, ax = plt.subplots(1, 2, figsize=(14, 4))
-        sns.distplot(x, ax=ax[0], color='#6666ff')
-        sns.distplot(x, hist_kws={'cumulative': True}, kde_kws={'cumulative': True}, ax=ax[1], color='#6666ff')
+        sns.histplot(x, ax=ax[0], color='#6666ff')
+        sns.histplot(x, cumulative=True, kde=True, ax=ax[1], color='#6666ff')
         plt.xlabel("Stock Price")
 
         img_buf = BytesIO()
@@ -667,8 +667,8 @@ def black_scholes_merton(stock_price, strike_price, rate, time, volatility, dive
 
 #if __name__ == '__main__':
 #    try:
-
-        # Start the Flask app
+#
+#        # Start the Flask app
 #        app.run(port=8000)
 #    except Exception as e:
 #        print(f"Error: {str(e)}")
