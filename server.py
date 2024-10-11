@@ -1,14 +1,10 @@
 import base64
-import datetime as dt
+import json
 import math
+import os
 import time
 from io import BytesIO
-import threading
-
 import matplotlib
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
 import seaborn as sns
 import yfinance as yf
 from flask import Flask, request, jsonify
@@ -20,6 +16,10 @@ import datetime as dt
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import style
+import math
+import matplotlib as mpl
+
+mpl.rcParams['font.family'] = 'serif'
 matplotlib.use('Agg')
 
 app = Flask(__name__)
@@ -41,11 +41,7 @@ def enable_cors(response):
 
 @app.route('/', methods=['GET', 'POST', 'OPTIONS'])  # Your existing route handling
 def process_data():
-
-
-
     try:
-
 
         if request.method == 'OPTIONS':
             # Respond to preflight request
@@ -85,6 +81,7 @@ def process_data():
             volatility_str = data.get('volatility')
             strike_str = data.get('strike')
             period_str = data.get('period')
+            crr = data.get('crr')
             interest_rate_str = data.get('interest_rate')
             start_date = dt.datetime.strptime(data.get('start_date'), '%Y-%m-%d')
             end_date = dt.datetime.strptime(data.get('end_date'), '%Y-%m-%d')
@@ -100,17 +97,55 @@ def process_data():
             print(model, ticker, volatility, strike, period, interest_rate, start_date, end_date)
 
             try:
-                result = black_scholes_merton(price, strike, interest_rate, period, volatility,divedend )
+                result = black_scholes_merton(price, strike, interest_rate, period, volatility, divedend, crr)
                 print(result)
                 return jsonify({'result': result})
             except Exception as ex:
                 print(f"Error in black_scholes_merton: {str(ex)}")
                 return jsonify({'error': 'An error occurred in black_scholes_merton'}), 500
 
+        # generate_and_plot_trees - binomial & trinomial
+        elif ticker != "" and model == 'binomial_and_trinomial':
+            print("we are in binomial_&_trinomial")
+            # Parameters
+            start_date = dt.datetime.strptime(data.get('start_date'), '%Y-%m-%d')
+            end_date = dt.datetime.strptime(data.get('end_date'), '%Y-%m-%d')
+            stock_price = import_stock_data(ticker, start_date, end_date)
+            S0 = stock_price.iloc[-1]# Initial stock price
+            K = data.get('strike')  # Strike price
+            T = data.get('time')  # Time to expiration in years
+            r = data.get('interest_rate')  # Risk-free interest rate
+
+            n = data.get('number_of_steps')  # Number of steps
+            option_type = data.get('option_type')
+            american = data.get('method_type')
+
+
+            strike = float(K) if K is not None else None
+            S0 = float(S0) if S0 is not None else None
+            T = int(T) if T is not None else None
+            r = float(r) if r is not None else None
+
+            n = int(n) if n is not None else None
+            american = bool(american) if american is not None else None
+
+            print(S0, K, T, r, n, option_type, american)
+
+            try:
+                result = generate_and_plot_trees(S0, strike, T, r, n, option_type, american)
+                print(result)
+                return jsonify({'result': result})
+            except Exception as ex:
+                print(f"Error in binomial_and_trinomial: {str(ex)}")
+                return jsonify({'error': 'An error occurred in binomial_and_trinomial'}), 500
+
         elif model == 'vasicek':
             # Handle Vasicek simulation
             result, status_code = Vasicek_simulation(data)
             return jsonify(result), status_code
+
+
+
 
         else:
             return jsonify({'error': 'Invalid model specified'}), 400
@@ -119,22 +154,277 @@ def process_data():
         return jsonify({'error': str(ex)}), 500
 
 
+
+# binomial & trinomial
+
+
+def generate_binomial_tree(S0, K, T, r, n, option_type, american):
+    """Generates a binomial tree for American option pricing.
+
+    Args:
+        S0 (float): Initial stock price
+        K (float): Option strike price
+        T (float): Time to maturity in years
+        r (float): Risk-free interest rate (as a decimal)
+        u (float): Up factor (e.g., 1.1 for 10% increase)
+        d (float): Down factor (e.g., 0.9 for 10% decrease)
+        n (int): Number of time steps
+        option_type (str): 'call' or 'put'
+        american (bool): If True, calculate American option; otherwise, European.
+
+    Returns:
+        tuple: Stock price tree, Option value tree
+    """
+    dt = T / n  # Time step
+
+    u = np.exp(sigma * np.sqrt(2 * dt))  # Up factor
+    d = 1 / u  # Down factor
+    q = (np.exp(r * dt) - d) / (u - d)  # Risk-neutral probability of up move
+
+    m = 1  # Middle factor (price stays the same)
+
+
+    discount = np.exp(-r * dt)  # Discount factor per time step
+
+    # Step 1: Generate stock price tree
+    stock_tree = []
+    for i in range(n + 1):
+        level = [S0 * (u**j) * (d**(i-j)) for j in range(i + 1)]
+        stock_tree.append(level)
+
+    # Step 2: Generate option value tree
+    option_tree = [[0.0 for _ in range(i + 1)] for i in range(n + 1)]
+
+    # Calculate option value at maturity (leaf nodes)
+    for j in range(n + 1):
+        if option_type == "call":
+            option_tree[n][j] = max(stock_tree[n][j] - K, 0)  # Call option payoff
+        elif option_type == "put":
+            option_tree[n][j] = max(K - stock_tree[n][j], 0)  # Put option payoff
+
+    # Step 3: Backward induction to calculate option value at each node
+    for i in range(n - 1, -1, -1):
+        for j in range(i + 1):
+            continuation_value = (q * option_tree[i + 1][j + 1] + (1 - q) * option_tree[i + 1][j]) * discount
+            if option_type == "call":
+                intrinsic_value = max(stock_tree[i][j] - K, 0)
+            elif option_type == "put":
+                intrinsic_value = max(K - stock_tree[i][j], 0)
+
+            if american:
+                # American option: Take the maximum of immediate exercise value and continuation value
+                option_tree[i][j] = max(continuation_value, intrinsic_value)
+            else:
+                # European option: Only continuation value matters
+                option_tree[i][j] = continuation_value
+
+    return stock_tree, option_tree
+
+
+def plot_binomial_tree_with_option(tree, option_tree, option_type):
+    """Plots the binomial tree with stock prices and option values at each node.
+
+    Args:
+        tree (list of lists): Stock price tree.
+        option_tree (list of lists): Option value tree.
+        option_type (str): 'call' or 'put' for labeling.
+    """
+    n = len(tree) - 1  # Number of steps
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+
+    for i, level in enumerate(tree):
+        x_positions = np.arange(-i, i + 1, 2)
+        y_positions = [n - i] * len(level)
+
+        # Plot stock prices at nodes
+        ax.scatter(x_positions, y_positions, color='cyan', s=100, zorder=3)
+
+        # Label nodes with stock prices
+        for j, price in enumerate(level):
+            ax.text(x_positions[j], y_positions[j], f'S: {price:.2f}', ha='center', va='center', fontsize=9, color='black', zorder=4)
+
+        # Label nodes with option prices
+        for j, option_price in enumerate(option_tree[i]):
+            ax.text(x_positions[j], y_positions[j] - 0.5, f'V: {option_price:.2f}', ha='center', va='center', fontsize=9, color='black', zorder=4)
+
+        # Plot connecting lines
+        if i > 0:
+            prev_x_positions = np.arange(-(i-1), (i-1) + 1, 2)
+            for j in range(len(level)):
+                ax.plot([prev_x_positions[j // 2], x_positions[j]], [y_positions[0] + 1, y_positions[0]], color='black', zorder=1)
+
+    # Formatting the plot
+    ax.set_title(f'Binomial Tree with Asset Prices and {option_type.capitalize()} Option Values')
+    ax.set_axis_off()  # Hide axes
+
+
+    # Encode the call plot as a base64 string
+    img_buffer_call = BytesIO()
+    plt.savefig(img_buffer_call, format='png')
+    img_buffer_call.seek(0)
+    binomial_plot = base64.b64encode(img_buffer_call.getvalue()).decode('utf-8')
+    plt.close(fig)  # Close the call figure to free memory
+
+    return binomial_plot
+
+
+
+
+def generate_trinomial_tree(S0, K, T, r, n, option_type, american):
+    """Generates a trinomial tree for American option pricing.
+
+    Args:
+        S0 (float): Initial stock price
+        K (float): Option strike price
+        T (float): Time to maturity in years
+        r (float): Risk-free interest rate (as a decimal)
+        u (float): Up factor (e.g., 1.1 for 10% increase)
+        d (float): Down factor (e.g., 0.9 for 10% decrease)
+        n (int): Number of time steps
+        option_type (str): 'call' or 'put'
+        american (bool): If True, calculate American option; otherwise, European.
+
+    Returns:
+        tuple: Stock price tree, Option value tree
+    """
+    dt = T / n  # Time step
+    m = 1  # Middle factor (price stays the same)
+    u = np.exp(sigma * np.sqrt(2 * dt))  # Up factor
+    d = 1 / u  # Down factor
+
+    q_up = ((np.exp(r * dt) - d) * (m - d)) / ((u - d) * (u - m))
+    q_down = ((u - np.exp(r * dt)) * (np.exp(r * dt) - d)) / ((u - d) * (u - m))
+    q_mid = 1 - q_up - q_down
+    discount = np.exp(-r * dt)  # Discount factor
+
+
+    # Step 1: Generate stock price tree
+    stock_tree = []
+    for i in range(n + 1):
+        level = [S0 * (u**j) * (m**(i - j)) * (d**(i - 2*j)) for j in range(i + 1)]
+        stock_tree.append(level)
+
+    # Step 2: Generate option value tree
+    option_tree = [[0.0 for _ in range(i + 1)] for i in range(n + 1)]
+
+    # Calculate option value at maturity (leaf nodes)
+    for j in range(n + 1):
+        if option_type == "call":
+            option_tree[n][j] = max(stock_tree[n][j] - K, 0)  # Call option payoff
+        elif option_type == "put":
+            option_tree[n][j] = max(K - stock_tree[n][j], 0)  # Put option payoff
+
+    # Step 3: Backward induction to calculate option value at each node
+    for i in range(n - 1, -1, -1):
+        for j in range(i + 1):
+            continuation_value = (
+                q_up * option_tree[i + 1][min(j + 1, i + 1)] +  # Prevent out-of-bounds
+                q_mid * option_tree[i + 1][j] +
+                q_down * option_tree[i + 1][max(j - 1, 0)]  # Prevent out-of-bounds
+            ) * discount
+
+            if option_type == "call":
+                intrinsic_value = max(stock_tree[i][j] - K, 0)
+            elif option_type == "put":
+                intrinsic_value = max(K - stock_tree[i][j], 0)
+
+            if american:
+                # American option: Take the maximum of immediate exercise value and continuation value
+                option_tree[i][j] = max(continuation_value, intrinsic_value)
+            else:
+                # European option: Only continuation value matters
+                option_tree[i][j] = continuation_value
+
+    return stock_tree, option_tree
+
+def plot_trinomial_tree_with_option(tree, option_tree, option_type):
+    """Plots the trinomial tree with stock prices and option values at each node.
+
+    Args:
+        tree (list of lists): Stock price tree.
+        option_tree (list of lists): Option value tree.
+        option_type (str): 'call' or 'put' for labeling.
+    """
+    n = len(tree) - 1  # Number of steps
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+
+    for i, level in enumerate(tree):
+        x_positions = np.arange(-i, i + 1, 2)
+        y_positions = [n - i] * len(level)
+
+        # Plot stock prices at nodes
+        ax.scatter(x_positions, y_positions, color='cyan', s=100, zorder=3)
+
+        # Label nodes with stock prices
+        for j, price in enumerate(level):
+            ax.text(x_positions[j], y_positions[j], f'S: {price:.2f}', ha='center', va='center', fontsize=9, color='black', zorder=4)
+
+        # Label nodes with option prices
+        for j, option_price in enumerate(option_tree[i]):
+            ax.text(x_positions[j], y_positions[j] - 0.5, f'V: {option_price:.2f}', ha='center', va='center', fontsize=9, color='black', zorder=4)
+
+        # Plot connecting lines
+        if i > 0:
+            prev_x_positions = np.arange(-(i-1), (i-1) + 1, 2)
+            for j in range(len(level)):
+                ax.plot([prev_x_positions[j // 2], x_positions[j]], [y_positions[0] + 1, y_positions[0]], color='black', zorder=1)
+
+    # Formatting the plot
+    ax.set_title(f'Trinomial Tree with Asset Prices and {option_type.capitalize()} Option Values')
+    ax.set_axis_off()  # Hide axes
+
+    # Encode the call plot as a base64 string
+    img_buffer_call = BytesIO()
+    plt.savefig(img_buffer_call, format='png')
+    img_buffer_call.seek(0)
+    trinomial_plot = base64.b64encode(img_buffer_call.getvalue()).decode('utf-8')
+    plt.close(fig)  # Close the call figure to free memory
+
+    return trinomial_plot
+
+
+def generate_and_plot_trees(S0, K, T, r, n, option_type, american):
+    """Generates both binomial and trinomial trees, plots them, and returns JSON with paths to saved plot images."""
+
+    # Generate binomial tree
+    binomial_stock_tree, binomial_option_tree = generate_binomial_tree(S0, K, T, r, n, option_type, american)
+
+    # Generate trinomial tree
+    trinomial_stock_tree, trinomial_option_tree = generate_trinomial_tree(S0, K, T, r, n, option_type, american)
+
+    # Plot both trees and get file paths for saved images
+    #  plot_trinomial_tree_with_option(stock_tree, option_tree, option_type="call")
+
+    binomial_plot_path = plot_binomial_tree_with_option(binomial_stock_tree, binomial_option_tree, option_type)
+    trinomial_plot_path = plot_trinomial_tree_with_option(trinomial_stock_tree, trinomial_option_tree, option_type)
+
+    return {
+        'binomial_tree_plot': binomial_plot_path,
+        'trinomial_tree_plot': trinomial_plot_path
+    }
+
+
+
+
 # Define the Vasicek simulation function
 def Vasicek_simulation(data):
     try:
         r0 = float(data.get('initial_short_rate', 0.02))  # Default initial short rate
-        a = float(data.get('mean_reversion_speed', 0.5)  )    # Default mean reversion speed
-        b = float(data.get('long_term_mean', 0.03) )    # Default long-term mean
-        sigma = float(data.get('vasicek_volatility', 0.01) ) # Default volatility
-        T = int(data.get('time_horizon', 10) )      # Default time horizon
+        a = float(data.get('mean_reversion_speed', 0.5))  # Default mean reversion speed
+        b = float(data.get('long_term_mean', 0.03))  # Default long-term mean
+        sigma = float(data.get('vasicek_volatility', 0.01))  # Default volatility
+        T = int(data.get('time_horizon', 10))  # Default time horizon
         num_steps = int(data.get('number_of_steps', 1000))  # Default number of steps
-        num_paths = int(data.get('number_of_paths', 20))      # Default number of paths
+        num_paths = int(data.get('number_of_paths', 20))  # Default number of paths
 
         # Perform Vasicek simulation
         try:
+            print("starting vasicek simulation")
             simulated_rates = simulate_vasicek(r0, a, b, sigma, T, num_steps, num_paths)
             MLE_Estimate = Vasicek_MLE(simulated_rates, T / num_steps, a, b)
-
+            print("calculation done ... proceeding to plotting")
             # Generate a plot
             fig, ax = plt.subplots()
             ax.plot(simulated_rates)
@@ -183,6 +473,8 @@ def Vasicek_simulation(data):
             img_buffer.seek(0)
             plot_data = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
 
+            print("plotting ")
+
             result = {
                 'a_est': round(MLE_Estimate[0], 3),
                 'b_est': round(MLE_Estimate[1], 3),
@@ -217,31 +509,32 @@ def Vasicek_MLE(r, dt, a, b):
     S1 = 0
     S00 = 0
     S01 = 0
-    for i in range(n-1):
+    for i in range(n - 1):
         S0 = S0 + r[i]
         S1 = S1 + r[i + 1]
         S00 = S00 + r[i] * r[i]
         S01 = S01 + r[i] * r[i + 1]
-    S0 = S0 / (n-1)
-    S1 = S1 / (n-1)
-    S00 = S00 / (n-1)
-    S01 = S01 / (n-1)
-    b_MLE = (S1 * S00 - S0 * S01) / (S0 * S1 - S0**2 - S01 + S00)
+    S0 = S0 / (n - 1)
+    S1 = S1 / (n - 1)
+    S00 = S00 / (n - 1)
+    S01 = S01 / (n - 1)
+    b_MLE = (S1 * S00 - S0 * S01) / (S0 * S1 - S0 ** 2 - S01 + S00)
     a_MLE = 1 / dt * np.log((S0 - b_MLE) / (S1 - b_MLE))
 
     # Estimation sigma
     beta = 1 / a * (1 - np.exp(-a * dt))
     temp = 0
-    for i in range(n-1):
+    for i in range(n - 1):
         mi = b * a * beta + r[i] * (1 - a * beta)
-        temp = temp + (r[i+1] - mi)**2
-    sigma_MLE = (1 / ((n - 1) * beta * (1 - .5 * a * beta)) * temp)**0.5
+        temp = temp + (r[i + 1] - mi) ** 2
+    sigma_MLE = (1 / ((n - 1) * beta * (1 - .5 * a * beta)) * temp) ** 0.5
     return a_MLE, b_MLE, sigma_MLE
 
-#MLE_Estimate = Vasicek_MLE(simulated_rates, T / num_steps)
-#print("a_est: " + str(np.round(MLE_Estimate[0], 3)))
-#print("b_est: " + str(np.round(MLE_Estimate[1], 3)))
-#print("sigma_est: " + str(np.round(MLE_Estimate[2], 3)))
+
+# MLE_Estimate = Vasicek_MLE(simulated_rates, T / num_steps)
+# print("a_est: " + str(np.round(MLE_Estimate[0], 3)))
+# print("b_est: " + str(np.round(MLE_Estimate[1], 3)))
+# print("sigma_est: " + str(np.round(MLE_Estimate[2], 3)))
 
 
 def import_stock_data(ticker, start, end):
@@ -302,6 +595,7 @@ market_prices.index = pd.to_datetime(market_prices.index)
 market_prices.index = market_prices.index.tz_localize(None)
 
 print(type(market_prices.index))  # Should print: <class 'pandas.core.indexes.datetimes.DatetimeIndex'>
+
 
 def capm(prices2, market_prices, riskfree_rate=0.025):
     """
@@ -498,7 +792,6 @@ def probs_find(predicted, higherthan, on='value'):
 
 
 def simulate_MonteCarlo(prices, days, iterations, return_type='log', plot=True):
-
     # Generate daily returns
 
     returns = daily_returns(prices, days, iterations, return_type)
@@ -573,11 +866,8 @@ def simulate_MonteCarlo(prices, days, iterations, return_type='log', plot=True):
     return result
 
 
-
-
 def pred_plot(prices, days, iterations=1000):
     style.use('ggplot')
-
 
     last_price = prices.iloc[-1]
     returns = prices.pct_change()
@@ -640,36 +930,180 @@ def execution_decision(strike_price, stock_price, option_type):
     return call_decision, put_decision
 
 
-def black_scholes_merton(stock_price, strike_price, rate, time, volatility, divedend):
-    try:
+# Cox-Ross-Rubinstein Binomial Model
+# Derivatives Analytics with Python
+#
 
-        d1 = (log(stock_price / strike_price) + (rate - divedend + volatility ** 2 / 2) * time) / (
+# Model Parameters
+#
+S0 = 100.0  # index level
+K = 100.0  # option strike
+T = 1.0  # maturity date
+r = 0.05  # risk-less short rate
+sigma = 0.2  # volatility
+
+
+# Valuation Function
+def CRR_option_value(S0, K, T, r, sigma, otype, M=4):
+    ''' Cox-Ross-Rubinstein European option valuation.
+
+    Parameters
+    ==========
+    S0 : float
+        stock/index level at time 0
+    K : float
+        strike price
+    T : float
+        date of maturity
+    r : float
+        constant, risk-less short rate
+    sigma : float
+        volatility
+    otype : string
+        either 'call' or 'put'
+    M : int
+        number of time intervals
+    '''
+    # Time Parameters
+    dt = T / M  # length of time interval
+    df = math.exp(-r * dt)  # discount per interval
+
+    # Binomial Parameters
+    u = math.exp(sigma * math.sqrt(dt))  # up movement
+    d = 1 / u  # down movement
+    q = (math.exp(r * dt) - d) / (u - d)  # martingale branch probability
+
+    # Array Initialization for Index Levels
+    mu = np.arange(M + 1)
+    mu = np.resize(mu, (M + 1, M + 1))
+    md = np.transpose(mu)
+    mu = u ** (mu - md)
+    md = d ** md
+    S = S0 * mu * md
+
+    # Inner Values
+    if otype == 'call':
+        V = np.maximum(S - K, 0)  # inner values for European call option
+    else:
+        V = np.maximum(K - S, 0)  # inner values for European put option
+
+    z = 0
+    for t in range(M - 1, -1, -1):  # backwards iteration
+        V[0:M - z, t] = (q * V[0:M - z, t + 1]
+                         + (1 - q) * V[1:M - z + 1, t + 1]) * df
+        z += 1
+    return V[0, 0]
+
+
+def black_scholes_merton(stock_price, strike_price, rate, time, volatility, dividend, crr):
+    try:
+        # Calculate d1 and d2
+        d1 = (log(stock_price / strike_price) + (rate - dividend + volatility ** 2 / 2) * time) / (
                 volatility * time ** 0.5)
         d2 = d1 - volatility * time ** 0.5
 
+        # Calculate call and put prices using BSM formula
         call = round(
-            stats.norm.cdf(d1) * stock_price * e ** (-divedend * time) - stats.norm.cdf(d2) * strike_price * e ** (
+            stats.norm.cdf(d1) * stock_price * e ** (-dividend * time) - stats.norm.cdf(d2) * strike_price * e ** (
                     -rate * time), 2)
         put = round(
             stats.norm.cdf(-d2) * strike_price * e ** (-rate * time) - stats.norm.cdf(-d1) * stock_price * e ** (
-                    -divedend * time), 2)
+                    -dividend * time), 2)
 
-        call_decision, put_decision = execution_decision(strike_price, stock_price, 'Call'), execution_decision(
-            strike_price, stock_price, 'Put')
+        call_decision = execution_decision(strike_price, stock_price, 'Call')
+        put_decision = execution_decision(strike_price, stock_price, 'Put')
 
-        return {'strike_price': strike_price, 'call': call, 'put': put, 'call_decision': call_decision,
-                'put_decision': put_decision}
+        plot = None
+
+        # If crr is True, call plot_convergence for both call and put
+        if crr:
+            callplot, putplot = plot_convergence(10, 200, 10, stock_price, call, put, strike_price, rate, time, volatility)
+
+        return {
+            'strike_price': strike_price,
+            'call': call,
+            'put': put,
+            'call_decision': call_decision,
+            'put_decision': put_decision,
+            'crr_call_plot_data': callplot,
+            'crr_put_plot_data': putplot,
+
+        }
 
     except Exception as ex:
         print(f"Error in black_scholes_merton: {str(ex)}")
-        return {'strike_price': 0, 'call': 0, 'put': 0, 'call_decision': 'Error', 'put_decision': 'Error'}
+        return {
+            'strike_price': 0,
+            'call': 0,
+            'put': 0,
+            'call_decision': 'Error',
+            'put_decision': 'Error',
+            'crr_plot_data': None
+        }
 
 
-#if __name__ == '__main__':
-#    try:
-#
-#        # Start the Flask app
-#        app.run(port=8000)
-#    except Exception as e:
-#        print(f"Error: {str(e)}")
-#        time.sleep(5)  # Wait for a while before restarting the app
+import matplotlib.pyplot as plt
+import base64
+from io import BytesIO
+from flask import jsonify
+
+
+import matplotlib.pyplot as plt
+import base64
+from io import BytesIO
+
+def plot_convergence(mmin, mmax, step_size, stock_price, call, put, strike_price, rate, time, volatility):
+    ''' Plots the CRR option values for increasing number of time intervals M against the Black-Scholes-Merton benchmark value.'''
+
+    BSM_benchmark_call = call
+    BSM_benchmark_put = put
+
+    m = range(mmin, mmax, step_size)
+    CRR_call_values = [CRR_option_value(stock_price, strike_price, time, rate, volatility, 'call', M) for M in m]
+    CRR_put_values = [CRR_option_value(stock_price, strike_price, time, rate, volatility, 'put', M) for M in m]
+
+    # Create a figure for the Call Option plot
+    fig_call, ax_call = plt.subplots(figsize=(9, 5))
+    ax_call.plot(m, CRR_call_values, label='CRR Call Values')
+    ax_call.axhline(BSM_benchmark_call, color='r', ls='dashed', lw=1.5, label='BSM Call Benchmark')
+    ax_call.set_xlabel('# of binomial steps $M$')
+    ax_call.set_ylabel('European Call Option Value')
+    ax_call.set_title('CRR Call vs BSM Call')
+    ax_call.legend()
+    ax_call.grid()
+
+    # Encode the call plot as a base64 string
+    img_buffer_call = BytesIO()
+    plt.savefig(img_buffer_call, format='png')
+    img_buffer_call.seek(0)
+    call_plot_data = base64.b64encode(img_buffer_call.getvalue()).decode('utf-8')
+    plt.close(fig_call)  # Close the call figure to free memory
+
+    # Create a figure for the Put Option plot
+    fig_put, ax_put = plt.subplots(figsize=(9, 5))
+    ax_put.plot(m, CRR_put_values, label='CRR Put Values')
+    ax_put.axhline(BSM_benchmark_put, color='b', ls='dashed', lw=1.5, label='BSM Put Benchmark')
+    ax_put.set_xlabel('# of binomial steps $M$')
+    ax_put.set_ylabel('European Put Option Value')
+    ax_put.set_title('CRR Put vs BSM Put')
+    ax_put.legend()
+    ax_put.grid()
+
+    # Encode the put plot as a base64 string
+    img_buffer_put = BytesIO()
+    plt.savefig(img_buffer_put, format='png')
+    img_buffer_put.seek(0)
+    put_plot_data = base64.b64encode(img_buffer_put.getvalue()).decode('utf-8')
+    plt.close(fig_put)  # Close the put figure to free memory
+
+    return call_plot_data, put_plot_data
+
+
+#black_scholes_merton(100, 100, 0.01, 30, 0.2, 0, "true")
+
+if __name__ == '__main__':
+    try:
+        app.run(port=8000)
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        time.sleep(5)  # Wait for a while before restarting the app
