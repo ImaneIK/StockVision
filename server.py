@@ -56,7 +56,7 @@ def process_data():
         print(f"Received ticker: {ticker}")
         if model == "":
             print("model is empty")
-            return jsonify({'error': 'Ticker or model is empty'}), 400
+            return jsonify({'error': 'model is empty'}), 400
 
         elif ticker != "" and model == 'MonteCarlo':
             print("we are in monte carlo")
@@ -98,7 +98,6 @@ def process_data():
 
             try:
                 result = black_scholes_merton(price, strike, interest_rate, period, volatility, divedend, crr)
-                print(result)
                 return jsonify({'result': result})
             except Exception as ex:
                 print(f"Error in black_scholes_merton: {str(ex)}")
@@ -144,7 +143,11 @@ def process_data():
             result, status_code = Vasicek_simulation(data)
             return jsonify(result), status_code
 
+        elif ticker == "" and model =="YC":
+            result, status_code = all_plots()
 
+            print(jsonify(result))
+            return result, status_code
 
 
         else:
@@ -1101,9 +1104,271 @@ def plot_convergence(mmin, mmax, step_size, stock_price, call, put, strike_price
 
 #black_scholes_merton(100, 100, 0.01, 30, 0.2, 0, "true")
 
-if __name__ == '__main__':
+# ==========================================================================================
+# Yield curve
+# ==========================================================================================
+import yfinance as yf
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objs as go
+from scipy.interpolate import interp1d, CubicSpline
+from scipy.optimize import curve_fit
+
+
+# Function to calculate the Nelson-Siegel yield curve
+def nelson_siegel(tau, beta0, beta1, beta2, tau1):
+    return beta0 + beta1 * (1 - np.exp(-tau / tau1)) / (tau / tau1) + beta2 * ((1 - np.exp(-tau / tau1)) / (tau / tau1) - np.exp(-tau / tau1))
+
+import numpy as np
+import plotly.graph_objects as go
+
+
+def cir_model_plot(r0=0.05, theta=0.03, kappa=0.1, sigma=0.02, T=10, num_paths=10):
+    """
+    Generate a CIR model simulation plot using Plotly.
+    """
+    # Define the CIR model simulation
+    def cir_model(r0, theta, kappa, sigma, T, num_paths=1000):
+        dt = 1 / 252  # Trading days
+        steps = int(T * 252)
+
+        rates = np.zeros((num_paths, steps + 1))
+        rates[:, 0] = r0
+
+        for t in range(1, steps + 1):
+            dr = (kappa * (theta - rates[:, t - 1]) * dt +
+                  sigma * np.sqrt(np.maximum(rates[:, t - 1], 0)) * np.sqrt(dt) *
+                  np.random.normal(0, 1, num_paths))
+            rates[:, t] = np.maximum(rates[:, t - 1] + dr, 0)
+
+        return rates
+
+    # Generate rates
+    rates = cir_model(r0, theta, kappa, sigma, T, num_paths)
+
+    # Create Plotly figure
+    fig = go.Figure()
+
+    for i in range(num_paths):
+        fig.add_trace(go.Scatter(x=np.linspace(0, T, int(T * 252) + 1),
+                                 y=rates[i, :],
+                                 mode='lines',
+                                 name=f'Path {i + 1}',
+                                 line=dict(width=1)))
+
+    # Update layout
+    fig.update_layout(title='CIR Model Simulation',
+                      xaxis_title='Time (Years)',
+                      yaxis_title='Interest Rate',
+                      hovermode="x unified",
+                      template="plotly_white")
+
+    # Return the figure as a JSON string
+    return fig.to_json()
+
+
+import numpy as np
+import plotly.graph_objects as go
+
+
+def hull_white_model_plot(r0=0.05, theta_func=lambda t: 0.03 + 0.01 * np.sin(2 * np.pi * t),
+                          kappa=0.1, sigma=0.02, T=10, num_paths=10):
+    """
+    Generate a Hull-White model simulation plot using Plotly.
+    """
+
+    def hull_white_model(r0, theta_func, kappa, sigma, T, num_paths=1000):
+        dt = 1 / 252  # Trading days
+        steps = int(T * 252)
+
+        rates = np.zeros((num_paths, steps + 1))
+        rates[:, 0] = r0
+
+        for t in range(1, steps + 1):
+            time = t * dt
+            theta = theta_func(time)
+            dr = (theta - kappa * rates[:, t - 1]) * dt + sigma * np.sqrt(dt) * np.random.normal(0, 1, num_paths)
+            rates[:, t] = rates[:, t - 1] + dr
+
+        return rates
+
+    # Simulate rates
+    rates = hull_white_model(r0, theta_func, kappa, sigma, T, num_paths)
+
+    # Create Plotly figure
+    fig = go.Figure()
+
+    for i in range(num_paths):
+        fig.add_trace(go.Scatter(x=np.linspace(0, T, int(T * 252) + 1),
+                                 y=rates[i, :],
+                                 mode='lines',
+                                 name=f'Path {i + 1}',
+                                 line=dict(width=1)))
+
+    # Update layout
+    fig.update_layout(title='Hull-White Model Simulation',
+                      xaxis_title='Time (Years)',
+                      yaxis_title='Interest Rate',
+                      hovermode="x unified",
+                      template="plotly_white")
+
+    # Return the figure as a JSON string
+    return fig.to_json()
+
+
+
+def all_plots():
     try:
-        app.run(port=8000)
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        time.sleep(5)  # Wait for a while before restarting the app
+        # Fetch U.S. Treasury yield data
+        tickers = ['^IRX', '^FVX', '^TNX', '^TYX']  # 3-month, 5-year, 10-year, 30-year Treasury yields
+        data = yf.download(tickers, period="5y")['Adj Close']
+        data.columns = ['3M', '5Y', '10Y', '30Y']
+
+        # Reset index to use dates as a column
+        data.reset_index(inplace=True)
+
+        # Extract maturities and yields
+        maturities = np.array([3 / 12, 5, 10, 30])  # Maturities in years
+        latest_yields = data.iloc[-1][1:].values  # Get the latest yields
+
+        # Interpolation using linear method
+        interp_func = interp1d(maturities, latest_yields, kind='linear', fill_value='extrapolate')
+        maturity_range = np.linspace(0.0833, 30, num=100)  # 1 month to 30 years
+        interpolated_yields = interp_func(maturity_range)
+
+        # Cubic Spline Interpolation
+        cs = CubicSpline(maturities, latest_yields)
+        cubic_spline_yields = cs(maturity_range)
+
+        # Bootstrapping method
+        def bootstrap_yield_curve(maturities, yields):
+            """
+            Bootstraps the yield curve from given maturities and yields.
+
+            Parameters:
+            maturities (array): An array of maturities in years.
+            yields (array): An array of corresponding yields.
+
+            Returns:
+            DataFrame: A DataFrame containing 'Maturity' and 'Yield' columns.
+            """
+            yield_curve = []
+
+            for i in range(len(maturities)):
+                if i == 0:  # For the first maturity
+                    yield_curve.append(yields[i])
+                else:
+                    # Calculate the yield for the current maturity
+                    previous_maturities = maturities[:i]
+                    previous_yields = yield_curve[:i]
+
+                    # Check for NaN values
+                    if np.any(np.isnan(previous_maturities)) or np.any(np.isnan(previous_yields)):
+                        yield_curve.append(np.nan)
+                    else:
+                        cash_flows = np.array(
+                            [100 * np.exp(-previous_yields[j] * previous_maturities[j]) for j in range(i)])
+                        yield_value = (100 - np.sum(cash_flows)) / 100  # Simplified yield calculation
+                        yield_curve.append(yield_value)
+
+            return pd.DataFrame({'Maturity': maturities, 'Yield': yield_curve})
+
+        # Create a DataFrame for the bootstrapped yield curve
+        bootstrapped_yield_curve = bootstrap_yield_curve(maturities, latest_yields)
+
+        # Interpolate the bootstrapped yields to match the maturity range
+        bootstrapped_interp_func = interp1d(bootstrapped_yield_curve['Maturity'], bootstrapped_yield_curve['Yield'],
+                                            kind='linear', fill_value='extrapolate')
+        bootstrapped_yields = bootstrapped_interp_func(maturity_range)
+
+        # Create a DataFrame for the yield curve containing both interpolated and cubic spline yields
+        yield_curve_df = pd.DataFrame({
+            'Maturity (Years)': maturity_range,
+            'Interpolated Yield (%)': interpolated_yields,
+            'Cubic Spline Yield (%)': cubic_spline_yields
+        })
+
+        # Add bootstrapped yields to the DataFrame
+        yield_curve_df = yield_curve_df.merge(bootstrapped_yield_curve, how='left', left_on='Maturity (Years)',
+                                              right_on='Maturity')
+        yield_curve_df.rename(columns={'Yield': 'Bootstrapped Yield (%)'}, inplace=True)
+
+        # Plot the yield curves
+        fig = px.line(
+            yield_curve_df,
+            x='Maturity (Years)',
+            y=['Interpolated Yield (%)', 'Cubic Spline Yield (%)', 'Bootstrapped Yield (%)'],
+            title='Constructed U.S. Treasury Yield Curves: Interpolated, Cubic Spline, and Bootstrapped',
+            labels={'value': 'Yield (%)', 'Maturity (Years)': 'Maturity (Years)'},
+            markers=True
+        )
+
+        # Update layout for better aesthetics
+        fig.update_layout(
+            xaxis_title='Maturity (Years)',
+            yaxis_title='Yield (%)',
+            template='plotly_white'  # Use a clean white background
+        )
+
+        # Convert the plot to JSON
+        yield_curve_plot = fig.to_json()
+
+        # Example plots for Nelson-Siegel, CIR, and Hull-White (replace with actual code for generating these plots)
+        ns_plot = px.scatter(title="Nelson-Siegel Example").to_json()
+        cir_plot = px.scatter(title="CIR Example").to_json()
+        hull_white_plot = px.scatter(title="Hull-White Example").to_json()
+
+        # Nelson-Siegel curve
+        tau = np.array([1 / 12, 3 / 12, 6 / 12, 1, 2, 3, 5, 7, 10, 20, 30])
+        yields_for_ns = interp_func(tau)  # Interpolate yields to match tau values
+        popt, _ = curve_fit(nelson_siegel, tau, yields_for_ns, p0=[0.05, -0.02, 0.02, 2])
+        ns_yield_curve = nelson_siegel(tau, *popt)
+
+        # Nelson-Siegel Plot
+        ns_plot = go.Figure()
+        ns_plot.add_trace(go.Scatter(x=tau, y=ns_yield_curve, mode='lines+markers', name='Nelson-Siegel'))
+        ns_plot.update_layout(
+            title="Nelson-Siegel Yield Curve",
+            xaxis_title="Maturity (Years)",
+            yaxis_title="Yield",
+            xaxis=dict(tickvals=[1 / 12, 1, 2, 5, 10, 30], ticktext=['1M', '1Y', '2Y', '5Y', '10Y', '30Y']),
+            template="plotly_white"
+        )
+
+        # CIR model plot
+        cir_plot = cir_model_plot()
+
+        # Hull-White model plot
+        hull_white_plot = hull_white_model_plot()
+
+        # Combine all plots in a dictionary
+        result = {
+            "yield_curve_plot": yield_curve_plot,
+
+            "nelson_siegel_plot": ns_plot.to_json(),
+
+            "cir_plot": cir_plot,
+
+            "hull_white_plot": hull_white_plot,
+        }
+
+        return result, 200
+
+    except Exception as ex:
+        return {"error": str(ex)}, 500
+
+
+
+# ================================== END - YIELD CURVE ========================================================
+
+
+
+# ================================== RUN MAIN APP ========================================================
+
+#if __name__ == '__main__':
+#    try:
+ #       app.run(port=8000)
+  #  except Exception as e:
+   #     print(f"Error: {str(e)}")
+    #    time.sleep(5)  # Wait for a while before restarting the app
